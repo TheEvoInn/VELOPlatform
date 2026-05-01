@@ -76,7 +76,7 @@ function FieldRow({ label, sensitive, aiButton, children, hint }: FieldRowProps)
 export default function IdentityStudioPage() {
   const [activeTab, setActiveTab] = useState<'real_identity' | 'ai_persona' | 'templates' | 'rules' | 'consent' | 'audit'>('real_identity');
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving] = useState(true);
   const queryClient = useQueryClient();
 
   // Real identity (PII)
