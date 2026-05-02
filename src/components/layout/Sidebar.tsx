@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Zap, Bot, Radar, Terminal,
   Wallet, Lock, Palette, Cpu, ShieldAlert,
   ChevronLeft, ChevronRight, LogOut, Settings,
-  TrendingUp, Package, Bitcoin, ShoppingBag, Target, Monitor, Activity, Code2
+  TrendingUp, Package, Bitcoin, ShoppingBag, Target, Monitor, Activity, Code2, Globe
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { User } from '@/types';
@@ -33,6 +33,7 @@ const NAV_ITEMS: NavItem[] = [
   { icon: Lock, label: 'Vault', path: '/vault', group: 'Finance' },
   { icon: TrendingUp, label: 'Analytics', path: '/analytics', group: 'Finance' },
   { icon: ShieldAlert, label: 'Safety Control', path: '/safety', group: 'System' },
+  { icon: Globe, label: 'Platform Registry', path: '/platforms', badge: 'NEW', group: 'System' },
   { icon: Activity, label: 'Audit Log', path: '/audit', badge: 'NEW', group: 'System' },
   { icon: Settings, label: 'Settings', path: '/settings', group: 'System' },
   { icon: Code2, label: 'Dev Console', path: '/dev-console', badge: 'ADMIN', group: 'System' },

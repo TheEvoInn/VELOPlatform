@@ -5,6 +5,7 @@ import TopBar from './TopBar';
 import StarfieldCanvas from './StarfieldCanvas';
 import OnboardingFlow from '@/components/features/OnboardingFlow';
 import { useOnboarding } from '@/hooks/useOnboarding';
+import { useTaskEarnings } from '@/hooks/useTaskEarnings';
 import type { User } from '@/types';
 
 // Lazy load pages for code splitting
@@ -25,6 +26,7 @@ const DropshippingPage = lazy(() => import('@/pages/DropshippingPage'));
 const MatchingSystemPage = lazy(() => import('@/pages/MatchingSystemPage'));
 const BrowserAutomationPage = lazy(() => import('@/pages/BrowserAutomationPage'));
 const AuditLogPage = lazy(() => import('@/pages/AuditLogPage'));
+const PlatformRegistryPage = lazy(() => import('@/pages/PlatformRegistryPage'));
 const DeveloperConsolePage = lazy(() => import('@/pages/DeveloperConsolePage'));
 const NotFound = lazy(() => import('@/pages/NotFound'));
 
@@ -44,6 +46,8 @@ interface AppLayoutProps {
 
 export default function AppLayout({ user, onLogout, pathname }: AppLayoutProps) {
   const { needsOnboarding, isLoading: onboardingLoading, completeStep, skipOnboarding } = useOnboarding();
+  // Real-world earnings pipeline — auto-logs wallet entries when sessions complete
+  useTaskEarnings(true);
 
   return (
     <div className="flex h-screen overflow-hidden relative">
@@ -78,6 +82,7 @@ export default function AppLayout({ user, onLogout, pathname }: AppLayoutProps) 
               <Route path="/analytics" element={<AnalyticsPage />} />
               <Route path="/safety" element={<SafetyPage />} />
               <Route path="/audit" element={<AuditLogPage />} />
+              <Route path="/platforms" element={<PlatformRegistryPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/dev-console" element={<DeveloperConsolePage />} />
               <Route index element={<Navigate to="/dashboard" replace />} />
