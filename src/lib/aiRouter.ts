@@ -496,6 +496,82 @@ export function clearAICache() {
   resultCache.clear();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Streaming local generation via Ollama (stream: true)
+// ─────────────────────────────────────────────────────────────────────────────
+export async function* generateWithOllamaStream(
+  systemPrompt: string,
+  userPrompt: string,
+  model?: string,
+): AsyncGenerator<string, void, unknown> {
+  const targetModel = model || _state.selectedModel;
+  if (!targetModel) {
+    throw new Error('No local model selected. Pull a model via Settings → AI Source.');
+  }
+
+  const fullPrompt =
+    `<|system|>\n${systemPrompt}\n<|end|>\n<|user|>\n${userPrompt}\n<|end|>\n<|assistant|>`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(`${OLLAMA_BASE}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: targetModel,
+        prompt: fullPrompt,
+        stream: true,
+        options: {
+          temperature: 0.7,
+          top_p: 0.9,
+          num_predict: 768,
+          stop: ['<|end|>', '<|user|>', '<|system|>'],
+        },
+      }),
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    if ((err as Error).name === 'AbortError') {
+      throw new Error(`Local model stream timed out after ${OLLAMA_TIMEOUT_MS / 1000}s.`);
+    }
+    throw new Error(`Could not reach Ollama: ${(err as Error).message}. Is Ollama running?`);
+  }
+
+  clearTimeout(timer);
+
+  if (!res.ok || !res.body) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Ollama stream error ${res.status}: ${errText}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n').filter(Boolean);
+      for (const line of lines) {
+        try {
+          const data = JSON.parse(line);
+          if (typeof data.response === 'string' && data.response) {
+            yield data.response;
+          }
+          if (data.done) return;
+        } catch { /* partial JSON or non-JSON line — skip */ }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 /** Pull a model via Ollama — returns a readable stream for progress */
 export async function pullOllamaModel(
   modelName: string,

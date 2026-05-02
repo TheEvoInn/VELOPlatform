@@ -12,7 +12,7 @@ import {
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
 import { useAIRouter } from '@/hooks/useAIRouter';
-import { routedGenerate, getRouterState } from '@/lib/aiRouter';
+import { routedGenerate, getRouterState, generateWithOllamaStream } from '@/lib/aiRouter';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { useQuery } from '@tanstack/react-query';
@@ -263,6 +263,10 @@ interface ChatMessage {
   timestamp: string;
   isThinking?: boolean;
   aiSource?: 'cloud' | 'local' | 'cache';
+  /** Marks this bubble as actively receiving stream tokens */
+  isStreaming?: boolean;
+  /** Stable key used to update this message in-place during streaming */
+  streamId?: string;
 }
 
 type DeployStage = 'idle' | 'validating' | 'testing' | 'previewing' | 'deploying' | 'done' | 'failed' | 'rolling_back';
@@ -440,6 +444,46 @@ function ChatBubble({ msg, onApplyPatch }: { msg: ChatMessage; onApplyPatch?: (c
       return <span key={i} className="text-sm leading-relaxed whitespace-pre-wrap">{part}</span>;
     });
   };
+
+  // ── Live streaming bubble ──────────────────────────────────────────────────
+  if (msg.isStreaming) {
+    const wordCount = msg.content.trim() ? msg.content.trim().split(/\s+/).length : 0;
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[88%] p-3 rounded-xl rounded-tl-none bg-[hsl(145_100%_50%/0.06)] border border-[hsl(145_100%_50%/0.25)] shadow-[0_0_14px_-6px_hsl(145_100%_50%/0.35)] transition-all">
+          {/* Header */}
+          <div className="flex items-center gap-1.5 mb-2">
+            <Bot size={11} className="text-[hsl(145,100%,55%)]" />
+            <span className="text-[10px] font-bold text-[hsl(145,100%,55%)]" style={{ fontFamily: 'Orbitron' }}>VELO DevBot</span>
+            <span className="text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5 bg-[hsl(145_100%_50%/0.12)] text-[hsl(145,100%,55%)] ml-1">
+              <Cpu size={8} /> Local AI · Streaming
+            </span>
+            {wordCount > 0 && (
+              <span className="ml-auto text-[9px] text-[hsl(145,100%,55%)] opacity-70 font-mono">
+                {wordCount} words
+              </span>
+            )}
+          </div>
+          {/* Streaming content */}
+          {msg.content ? (
+            <div className="text-sm leading-relaxed whitespace-pre-wrap">
+              {msg.content}
+              <span className="inline-block w-[2px] h-[1em] bg-[hsl(145,100%,55%)] ml-0.5 align-middle animate-[cursor-blink]" />
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 text-[hsl(145,100%,55%)]">
+              <div className="flex gap-1">
+                {[0, 0.15, 0.3].map(d => (
+                  <div key={d} className="w-1.5 h-1.5 rounded-full bg-[hsl(145,100%,55%)] animate-pulse" style={{ animationDelay: `${d}s` }} />
+                ))}
+              </div>
+              <span className="text-xs">Local AI thinking...</span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (msg.isThinking) {
     return (
@@ -1030,7 +1074,7 @@ export default function DeveloperConsolePage() {
     });
   }, [selectedFile, originalCode, changes]);
 
-  // ── AI Assistant (credit-aware with local fallback) ──────────────────
+  // ── AI Assistant (credit-aware with local fallback + streaming) ──────────
   const sendAIMessage = useCallback(async (overrideMessage?: string) => {
     const messageText = overrideMessage || chatInput.trim();
     if (!messageText || aiThinking) return;
@@ -1039,13 +1083,13 @@ export default function DeveloperConsolePage() {
       role: 'user', content: messageText,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
-    const thinkingMsg: ChatMessage = { role: 'assistant', content: '', timestamp: '', isThinking: true, aiSource: 'cloud' };
 
-    setChatMessages(prev => [...prev, userMsg, thinkingMsg]);
+    setChatMessages(prev => [...prev, userMsg]);
     setChatInput('');
     setAiThinking(true);
 
-    const history = chatMessages.filter(m => !m.isThinking && m.role !== 'system')
+    const history = chatMessages
+      .filter(m => !m.isThinking && !m.isStreaming && m.role !== 'system')
       .slice(-10)
       .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }));
 
@@ -1085,12 +1129,17 @@ RULES:
       return parts.join('');
     };
 
-    // Try cloud first via Edge Function, fallback to routedGenerate (which uses local)
-    let responseText: string | null = null;
-    let aiSource: 'cloud' | 'local' | 'cache' = 'cloud';
+    const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    // Cloud attempt via dev-console Edge Function
-    if (router.mode !== 'local' && !router.forcedLocalMode) {
+    // ── Branch: try cloud first (unless forced local) ────────────────────────
+    const useCloud = router.mode !== 'local' && !router.forcedLocalMode;
+
+    if (useCloud) {
+      // Show thinking indicator for cloud
+      setChatMessages(prev => [...prev, {
+        role: 'assistant', content: '', timestamp: ts, isThinking: true, aiSource: 'cloud',
+      }]);
+
       const { data, error } = await supabase.functions.invoke('dev-console', {
         body: {
           action: 'ai_assist',
@@ -1102,45 +1151,101 @@ RULES:
       });
 
       if (!error && data?.text) {
-        responseText = data.text;
-        aiSource = 'cloud';
+        setAiThinking(false);
+        setChatMessages(prev => [
+          ...prev.filter(m => !m.isThinking),
+          { role: 'assistant', content: data.text, timestamp: ts, aiSource: 'cloud' },
+        ]);
+        return;
       }
+
+      // Cloud failed — fall through to local stream below
+      setChatMessages(prev => prev.filter(m => !m.isThinking));
     }
 
-    // Local AI fallback via aiRouter
-    if (!responseText) {
-      const { text, error: localError, source } = await routedGenerate({
-        content_type: 'raw',
-        context: {
-          _raw_system: systemPrompt,
-          _raw_user: buildUserPrompt(messageText),
-          file_path: selectedFile?.name || 'none',
+    // ── Branch: local Ollama streaming ───────────────────────────────────────
+    const ollamaReady = router.ollamaAvailable || (await import('@/lib/aiRouter').then(m => m.checkOllamaHealth()));
+
+    if (ollamaReady) {
+      const streamId = `stream_${Date.now()}`;
+      const routerState = getRouterState();
+      const model = routerState.selectedModel || undefined;
+
+      // Seed the streaming bubble (empty content, isStreaming=true)
+      setChatMessages(prev => [
+        ...prev.filter(m => !m.isThinking),
+        {
+          role: 'assistant', content: '', timestamp: ts,
+          aiSource: 'local', isStreaming: true, streamId,
         },
-        identity: { name: 'DevBot', persona: 'Expert VELO 2.0 developer', tone: 'technical', style: 'precise and actionable' },
-      }, { isSimpleTask: false });
+      ]);
 
-      if (text) {
-        responseText = text;
-        aiSource = source === 'cache' ? 'cache' : 'local';
-      } else if (localError) {
-        responseText = `❌ DevBot error: ${localError}\n\nPlease check that cloud AI is configured in Settings → AI Source, or start Ollama for local AI fallback.`;
-        aiSource = 'local';
+      // Show one-time toast only on first local use
+      toast.info(`🧠 DevBot streaming via Local AI (${model || 'Ollama'})`, {
+        id: 'devbot-local-stream', duration: 3000,
+      });
+
+      let accumulated = '';
+      let errMsg: string | null = null;
+
+      try {
+        const gen = generateWithOllamaStream(systemPrompt, buildUserPrompt(messageText), model);
+        for await (const token of gen) {
+          accumulated += token;
+          // Batch-update every token — React batches these automatically in concurrent mode
+          setChatMessages(prev =>
+            prev.map(m =>
+              m.streamId === streamId ? { ...m, content: accumulated } : m
+            )
+          );
+        }
+      } catch (e) {
+        errMsg = (e as Error).message;
       }
+
+      // Finalise: remove streaming markers, add apply patch support
+      setAiThinking(false);
+      setChatMessages(prev =>
+        prev.map(m =>
+          m.streamId === streamId
+            ? {
+                ...m,
+                content: accumulated || (errMsg ? `❌ Local AI error: ${errMsg}` : 'No response generated.'),
+                isStreaming: false,
+                streamId: undefined,
+              }
+            : m
+        )
+      );
+      return;
     }
+
+    // ── Fallback: non-streaming routedGenerate ───────────────────────────────
+    setChatMessages(prev => [
+      ...prev.filter(m => !m.isThinking),
+      { role: 'assistant', content: '', timestamp: ts, isThinking: true, aiSource: 'cloud' },
+    ]);
+
+    const { text, error: fallbackError, source } = await routedGenerate({
+      content_type: 'raw',
+      context: {
+        _raw_system: systemPrompt,
+        _raw_user: buildUserPrompt(messageText),
+        file_path: selectedFile?.name || 'none',
+      },
+      identity: { name: 'DevBot', persona: 'Expert VELO 2.0 developer', tone: 'technical', style: 'precise and actionable' },
+    }, { isSimpleTask: false });
 
     setAiThinking(false);
-    setChatMessages(prev => prev.filter(m => !m.isThinking));
-    setChatMessages(prev => [...prev, {
-      role: 'assistant',
-      content: responseText || 'No response generated.',
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      aiSource,
-    }]);
-
-    // Show toast if switched to local
-    if (aiSource === 'local') {
-      toast.info(`🧠 DevBot running on Local AI (${router.selectedModel || 'Ollama'})`, { id: 'devbot-local', duration: 3000 });
-    }
+    setChatMessages(prev => [
+      ...prev.filter(m => !m.isThinking),
+      {
+        role: 'assistant',
+        content: text || (fallbackError ? `❌ DevBot error: ${fallbackError}\n\nStart Ollama for local AI fallback, or check cloud AI credits.` : 'No response generated.'),
+        timestamp: ts,
+        aiSource: source === 'cache' ? 'cache' : 'local',
+      },
+    ]);
   }, [chatInput, aiThinking, chatMessages, selectedFile, editedCode, router]);
 
   const quickAction = (prompt: string) => {
