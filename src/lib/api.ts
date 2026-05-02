@@ -182,7 +182,7 @@ export async function getDropshipOrdersFromDB() {
 export interface UserDocument {
   id: string;
   doc_key: string;
-  doc_type: string;
+  doc_type: 'government_id' | 'proof_of_address' | 'resume' | 'portfolio' | 'certificate' | 'other';
   doc_label: string;
   storage_path: string;
   file_name: string;

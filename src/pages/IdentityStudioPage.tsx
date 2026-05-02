@@ -1,15 +1,20 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Cpu, Save, Plus, Trash2, CheckCircle, Shield, Eye, EyeOff,
   Lock, Unlock, AlertTriangle, Clock, RefreshCw, User, Briefcase,
   Globe, Phone, MapPin, Star, FileText, Activity, Sparkles, Wand2,
-  ChevronRight, Copy, Info
+  ChevronRight, Copy, Info, Upload, Image, FolderOpen, ExternalLink,
+  FileBadge, FileCheck, AlertCircle, Database
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import { getUserIdentity, upsertUserIdentity, giveIdentityConsent, revokeIdentityConsent,
-  getIdentityConsentLog, type UserIdentity
+import {
+  getUserIdentity, upsertUserIdentity, giveIdentityConsent, revokeIdentityConsent,
+  getIdentityConsentLog, getUserDocuments, getDocumentSignedUrl,
+  type UserIdentity, type UserDocument
 } from '@/lib/api';
+import { supabase } from '@/lib/supabase';
+import { getVaultKey, encryptVaultValue } from '@/lib/vaultCrypto';
 import { useQueryClient } from '@tanstack/react-query';
 import { QUERY_KEYS } from '@/hooks/useSharedData';
 import AIFieldGenerator from '@/components/features/AIFieldGenerator';
@@ -76,7 +81,7 @@ function FieldRow({ label, sensitive, aiButton, children, hint }: FieldRowProps)
 export default function IdentityStudioPage() {
   const [activeTab, setActiveTab] = useState<'real_identity' | 'ai_persona' | 'templates' | 'rules' | 'consent' | 'audit'>('real_identity');
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(true);
+  const [saving, setSaving] = useState(false);
   const queryClient = useQueryClient();
 
   // Real identity (PII)
@@ -106,6 +111,14 @@ export default function IdentityStudioPage() {
   // AI tone preview state
   const [tonePreviews, setTonePreviews] = useState('');
 
+  // ── Documents tab ─────────────────────────────────────────────────────────
+  const [documents, setDocuments]             = useState<UserDocument[]>([]);
+  const [docsLoading, setDocsLoading]         = useState(false);
+  const [uploadingSlot, setUploadingSlot]     = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress]   = useState(0);
+  const [uploadError, setUploadError]         = useState<string | null>(null);
+  const docFileRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
   useEffect(() => {
     (async () => {
       const { data } = await getUserIdentity();
@@ -118,6 +131,115 @@ export default function IdentityStudioPage() {
       setLoading(false);
     })();
   }, []);
+
+  // Load documents when that tab becomes active
+  const loadDocuments = useCallback(async () => {
+    setDocsLoading(true);
+    const { data } = await getUserDocuments();
+    setDocuments(data);
+    setDocsLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'documents') loadDocuments();
+  }, [activeTab, loadDocuments]);
+
+  // ── Re-upload handler ────────────────────────────────────────────────────
+  const handleDocReupload = useCallback(async (slot: DocSlot, file: File) => {
+    const ALLOWED = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'application/pdf'];
+    if (!ALLOWED.includes(file.type)) {
+      toast.error(`"${file.type}" not supported. Use JPG, PNG, WEBP, or PDF.`);
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum is 5 MB.`);
+      return;
+    }
+    if (file.size === 0) { toast.error('File is empty — select a valid document.'); return; }
+
+    setUploadingSlot(slot.key);
+    setUploadProgress(10);
+    setUploadError(null);
+
+    const { data: { user }, error: authErr } = await supabase.auth.getUser();
+    if (authErr || !user) {
+      setUploadingSlot(null);
+      toast.error('Authentication required — please log in again.');
+      return;
+    }
+
+    const ext     = file.name.split('.').pop()?.toLowerCase() || 'bin';
+    const safeKey = slot.key.replace(/[^a-z0-9_-]/gi, '_');
+    const path    = `identity-documents/${user.id}/${safeKey}_${Date.now()}.${ext}`;
+
+    // Upload with retry
+    let uploadErr: string | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      setUploadProgress(20 + attempt * 15);
+      const { error } = await supabase.storage
+        .from('identity-docs')
+        .upload(path, file, { contentType: file.type, upsert: true });
+      if (!error) { uploadErr = null; break; }
+      uploadErr = error.message;
+      if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
+    }
+
+    if (uploadErr) {
+      setUploadingSlot(null);
+      setUploadError(uploadErr);
+      toast.error(`Upload failed: ${uploadErr}`);
+      return;
+    }
+
+    setUploadProgress(70);
+
+    // Save metadata
+    await supabase.from('user_documents').upsert({
+      user_id: user.id, doc_key: slot.key, doc_type: slot.docType,
+      doc_label: slot.label, storage_path: path,
+      file_name: file.name, file_size: file.size, mime_type: file.type,
+      verification_status: 'uploaded', source: 'identity_studio',
+      metadata: { uploaded_at: new Date().toISOString() },
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,doc_key' });
+
+    setUploadProgress(85);
+
+    // Update has_id_document flag if applicable
+    if (slot.isIdDoc) {
+      await supabase.from('user_identity').upsert(
+        { user_id: user.id, has_id_document: true, updated_at: new Date().toISOString() },
+        { onConflict: 'user_id' }
+      );
+    }
+
+    // Save encrypted path to Vault
+    try {
+      const vaultKey   = await getVaultKey(user.id, user.email ?? user.id);
+      const encPath    = await encryptVaultValue(path, vaultKey);
+      const credName   = `${slot.label} — ${file.name.slice(0, 40)}`;
+      await supabase.from('credentials').upsert({
+        user_id: user.id, name: credName,
+        type: slot.isIdDoc ? 'id_document' : 'document',
+        platform: 'Identity Vault',
+        encrypted_data: encPath, is_encrypted: true,
+        last_accessed: new Date().toISOString(),
+      }, { onConflict: 'user_id,name' });
+    } catch { /* non-fatal */ }
+
+    setUploadProgress(100);
+    setUploadingSlot(null);
+
+    // Refresh docs + identity caches
+    await loadDocuments();
+    const { data: freshId } = await getUserIdentity();
+    if (freshId) {
+      setIdentity(freshId);
+      queryClient.invalidateQueries({ queryKey: QUERY_KEYS.identity });
+    }
+
+    toast.success(`${slot.label} uploaded and stored securely`);
+  }, [loadDocuments, queryClient]);
 
   // Shared AI context derived from current identity state
   const aiContext = {
@@ -197,6 +319,29 @@ export default function IdentityStudioPage() {
   };
 
   const completeness = identity.completeness_score ?? 0;
+
+  // ── Document slot definitions ──────────────────────────────────────────
+  interface DocSlot {
+    key: string;
+    label: string;
+    docType: UserDocument['doc_type'];
+    isIdDoc: boolean;
+    required: boolean;
+    description: string;
+  }
+
+  const DOC_SLOTS: DocSlot[] = [
+    { key: 'gov_id_front',     label: 'Government ID — Front',    docType: 'government_id',    isIdDoc: true,  required: true,  description: 'Passport, national ID, or driver license (front side)' },
+    { key: 'gov_id_back',      label: 'Government ID — Back',     docType: 'government_id',    isIdDoc: true,  required: false, description: 'Back side of ID card (if applicable)' },
+    { key: 'proof_of_address', label: 'Proof of Address',         docType: 'proof_of_address', isIdDoc: false, required: false, description: 'Utility bill, bank statement, or lease (last 3 months)' },
+    { key: 'resume',           label: 'Resume / CV',              docType: 'resume',           isIdDoc: false, required: false, description: 'PDF or DOCX resume used in applications' },
+    { key: 'portfolio',        label: 'Portfolio / Work Samples', docType: 'portfolio',        isIdDoc: false, required: false, description: 'Work samples, case studies, or portfolio PDF' },
+    { key: 'certificate',      label: 'Certificates',             docType: 'certificate',      isIdDoc: false, required: false, description: 'Professional certifications or credentials' },
+  ];
+
+  const docByKey = Object.fromEntries(documents.map(d => [d.doc_key, d]));
+  const uploadedCount  = DOC_SLOTS.filter(s => docByKey[s.key]).length;
+  const idDocsUploaded = DOC_SLOTS.filter(s => s.isIdDoc && docByKey[s.key]).length;
 
   return (
     <div className="space-y-6 slide-in-up">
@@ -291,6 +436,7 @@ export default function IdentityStudioPage() {
       <div className="flex gap-1 p-1 rounded-xl border border-[hsl(var(--border))] bg-[hsl(228_25%_8%)] overflow-x-auto">
         {([
           { id: 'real_identity', label: 'Real Identity', icon: User },
+          { id: 'documents',     label: 'Documents',     icon: Upload },
           { id: 'consent',       label: 'Consent',       icon: Shield },
           { id: 'ai_persona',    label: 'AI Persona',    icon: Cpu },
           { id: 'templates',     label: 'Templates',     icon: FileText },
@@ -637,6 +783,250 @@ export default function IdentityStudioPage() {
                 {saving ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
                 {saving ? 'Saving...' : 'Save Identity Profile'}
               </button>
+            </div>
+          )}
+
+          {/* ─── DOCUMENTS TAB ─────────────────────────────────────────────── */}
+          {activeTab === 'documents' && (
+            <div className="space-y-5">
+              {/* Summary bar */}
+              <div className="glass-panel rounded-xl border border-[hsl(var(--border))] p-4">
+                <div className="flex items-center gap-5 flex-wrap">
+                  <div className="flex items-center gap-3">
+                    <div className={cn(
+                      'w-10 h-10 rounded-xl flex items-center justify-center',
+                      idDocsUploaded > 0 ? 'bg-[hsl(145_100%_50%/0.12)]' : 'bg-[hsl(265_80%_55%/0.1)]'
+                    )}>
+                      {idDocsUploaded > 0
+                        ? <FileCheck size={18} className="text-[hsl(145,100%,55%)]" />
+                        : <FileBadge size={18} className="text-[hsl(265,80%,70%)]" />}
+                    </div>
+                    <div>
+                      <div className="text-xs font-bold" style={{ fontFamily: 'Orbitron' }}>
+                        {idDocsUploaded > 0 ? 'ID DOCUMENT ON FILE' : 'NO ID DOCUMENT'}
+                      </div>
+                      <div className="text-[10px] text-muted-foreground">
+                        {idDocsUploaded > 0
+                          ? `${idDocsUploaded} government ID file${idDocsUploaded > 1 ? 's' : ''} · Autopilot eligibility unlocked`
+                          : 'Upload a government ID to enable identity-verified platforms'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Upload progress pills */}
+                  <div className="flex gap-3 ml-auto">
+                    <div className="text-center">
+                      <div className="text-lg font-black text-[hsl(185,100%,55%)]" style={{ fontFamily: 'Orbitron' }}>{uploadedCount}</div>
+                      <div className="text-[10px] text-muted-foreground">Uploaded</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-lg font-black text-muted-foreground" style={{ fontFamily: 'Orbitron' }}>{DOC_SLOTS.length - uploadedCount}</div>
+                      <div className="text-[10px] text-muted-foreground">Missing</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-lg font-black" style={{ fontFamily: 'Orbitron', color: `hsl(${Math.round((uploadedCount / DOC_SLOTS.length) * 120)}, 100%, 55%)` }}>
+                        {Math.round((uploadedCount / DOC_SLOTS.length) * 100)}%
+                      </div>
+                      <div className="text-[10px] text-muted-foreground">Complete</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Overall progress bar */}
+                <div className="mt-3 h-1.5 rounded-full bg-[hsl(228_25%_12%)] overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 transition-all duration-700"
+                    style={{ width: `${Math.max(3, (uploadedCount / DOC_SLOTS.length) * 100)}%` }}
+                  />
+                </div>
+              </div>
+
+              {docsLoading ? (
+                <div className="flex items-center justify-center py-10">
+                  <div className="w-6 h-6 border-2 border-[hsl(265_80%_55%/0.3)] border-t-[hsl(265,80%,70%)] rounded-full animate-spin" />
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {DOC_SLOTS.map(slot => {
+                    const doc       = docByKey[slot.key];
+                    const isUploaded = !!doc;
+                    const isUploading = uploadingSlot === slot.key;
+                    const fileSizeKB = doc ? (doc.file_size / 1024).toFixed(0) : null;
+                    const fileSizeMB = doc && doc.file_size > 1024 * 1024 ? (doc.file_size / 1024 / 1024).toFixed(1) + ' MB' : null;
+
+                    const typeColors: Record<string, string> = {
+                      government_id:    'text-[hsl(265,80%,70%)] bg-[hsl(265_80%_55%/0.1)] border-[hsl(265_80%_55%/0.2)]',
+                      proof_of_address: 'text-[hsl(185,100%,55%)] bg-[hsl(185_100%_50%/0.1)] border-[hsl(185_100%_50%/0.2)]',
+                      resume:           'text-[hsl(50,100%,60%)] bg-[hsl(50_100%_50%/0.1)] border-[hsl(50_100%_50%/0.2)]',
+                      portfolio:        'text-[hsl(30,100%,60%)] bg-[hsl(30_100%_55%/0.1)] border-[hsl(30_100%_55%/0.2)]',
+                      certificate:      'text-[hsl(145,100%,55%)] bg-[hsl(145_100%_50%/0.1)] border-[hsl(145_100%_50%/0.2)]',
+                      other:            'text-muted-foreground bg-[hsl(228_25%_12%)] border-[hsl(var(--border))]',
+                    };
+                    const statusColors: Record<string, string> = {
+                      uploaded:  'text-[hsl(145,100%,55%)] bg-[hsl(145_100%_50%/0.08)] border-[hsl(145_100%_50%/0.2)]',
+                      verified:  'text-[hsl(185,100%,55%)] bg-[hsl(185_100%_50%/0.08)] border-[hsl(185_100%_50%/0.2)]',
+                      rejected:  'text-[hsl(0,85%,65%)] bg-[hsl(0_85%_60%/0.08)] border-[hsl(0_85%_60%/0.2)]',
+                      pending:   'text-[hsl(50,100%,60%)] bg-[hsl(50_100%_50%/0.08)] border-[hsl(50_100%_50%/0.2)]',
+                    };
+
+                    return (
+                      <div
+                        key={slot.key}
+                        className={cn(
+                          'glass-panel rounded-xl border transition-all overflow-hidden',
+                          isUploaded  ? 'border-[hsl(145_100%_50%/0.2)]'
+                          : slot.required ? 'border-[hsl(265_80%_55%/0.25)] border-dashed'
+                          : 'border-[hsl(var(--border))]'
+                        )}
+                      >
+                        <div className="flex items-start gap-4 p-4">
+                          {/* Icon */}
+                          <div className={cn(
+                            'w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0',
+                            isUploaded ? 'bg-[hsl(145_100%_50%/0.12)]' : 'bg-[hsl(228_25%_12%)]'
+                          )}>
+                            {isUploading
+                              ? <RefreshCw size={16} className="animate-spin text-[hsl(185,100%,55%)]" />
+                              : isUploaded
+                              ? <FileCheck size={16} className="text-[hsl(145,100%,55%)]" />
+                              : slot.docType === 'resume' || slot.docType === 'portfolio' || slot.docType === 'certificate'
+                              ? <FileText size={16} className="text-muted-foreground" />
+                              : <Image size={16} className="text-muted-foreground" />}
+                          </div>
+
+                          <div className="flex-1 min-w-0">
+                            {/* Header row */}
+                            <div className="flex items-center gap-2 flex-wrap mb-1">
+                              <span className="text-sm font-semibold">{slot.label}</span>
+                              {slot.required && !isUploaded && (
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded border border-[hsl(265_80%_55%/0.3)] bg-[hsl(265_80%_55%/0.08)] text-[hsl(265,80%,70%)] uppercase">Required</span>
+                              )}
+                              {/* Type badge */}
+                              <span className={cn('text-[9px] px-1.5 py-0.5 rounded border capitalize', typeColors[slot.docType] ?? typeColors.other)}>
+                                {slot.docType.replace(/_/g, ' ')}
+                              </span>
+                              {/* Verification status */}
+                              {doc && (
+                                <span className={cn('text-[9px] px-1.5 py-0.5 rounded border capitalize', statusColors[doc.verification_status] ?? statusColors.uploaded)}>
+                                  {doc.verification_status}
+                                </span>
+                              )}
+                            </div>
+
+                            {/* File info or description */}
+                            {isUploaded && doc ? (
+                              <div className="space-y-1">
+                                <div className="flex items-center gap-2 text-[11px] text-muted-foreground flex-wrap">
+                                  <span className="font-medium text-foreground/70 truncate max-w-[200px]">{doc.file_name}</span>
+                                  <span>·</span>
+                                  <span>{fileSizeMB ?? `${fileSizeKB} KB`}</span>
+                                  <span>·</span>
+                                  <span className="flex items-center gap-1"><Clock size={9} /> {timeAgo(doc.created_at)}</span>
+                                  {doc.mime_type && (
+                                    <><span>·</span><span className="uppercase text-[10px]">{doc.mime_type.split('/')[1]}</span></>
+                                  )}
+                                </div>
+                                {doc.source && (
+                                  <div className="text-[10px] text-muted-foreground">
+                                    Via: <span className="capitalize">{doc.source.replace(/_/g, ' ')}</span>
+                                    {' · '}
+                                    <span className="text-[hsl(145,100%,55%)]">
+                                      🔒 Stored in identity-docs bucket
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="text-[11px] text-muted-foreground">{slot.description}</div>
+                            )}
+
+                            {/* Upload progress bar */}
+                            {isUploading && (
+                              <div className="mt-2">
+                                <div className="flex justify-between text-[10px] text-muted-foreground mb-1">
+                                  <span>Uploading & encrypting...</span>
+                                  <span>{uploadProgress}%</span>
+                                </div>
+                                <div className="h-1.5 rounded-full bg-[hsl(228_25%_15%)] overflow-hidden">
+                                  <div
+                                    className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 transition-all duration-300"
+                                    style={{ width: `${uploadProgress}%` }}
+                                  />
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Error state */}
+                            {!isUploading && uploadError && uploadingSlot === null && slot.key === (documents.find(d => d.doc_key === slot.key) ? null : slot.key) && (
+                              <div className="mt-2 flex items-center gap-2 text-[11px] text-[hsl(0,85%,65%)]">
+                                <AlertCircle size={10} /> {uploadError}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Action buttons */}
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            {/* View signed URL */}
+                            {isUploaded && doc && (
+                              <button
+                                onClick={async () => {
+                                  const url = await getDocumentSignedUrl(doc.storage_path);
+                                  if (url) window.open(url, '_blank');
+                                  else toast.error('Could not generate secure preview URL');
+                                }}
+                                className="p-1.5 rounded-lg hover:bg-[hsl(185_100%_50%/0.1)] transition-colors"
+                                title="Preview document (1hr signed URL)"
+                              >
+                                <ExternalLink size={13} className="text-[hsl(185,100%,55%)]" />
+                              </button>
+                            )}
+                            {/* Re-upload / Upload button */}
+                            <button
+                              onClick={() => docFileRefs.current[slot.key]?.click()}
+                              disabled={isUploading}
+                              className={cn(
+                                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all',
+                                isUploaded
+                                  ? 'border-[hsl(185_100%_50%/0.3)] text-[hsl(185,100%,55%)] hover:bg-[hsl(185_100%_50%/0.08)]'
+                                  : slot.required
+                                  ? 'border-[hsl(265_80%_55%/0.4)] bg-[hsl(265_80%_55%/0.08)] text-[hsl(265,80%,70%)] hover:bg-[hsl(265_80%_55%/0.15)]'
+                                  : 'border-[hsl(var(--border))] text-muted-foreground hover:text-foreground hover:bg-[hsl(228_25%_12%)]',
+                                isUploading && 'opacity-50 cursor-not-allowed'
+                              )}
+                            >
+                              <Upload size={11} />
+                              {isUploaded ? 'Re-upload' : 'Upload'}
+                            </button>
+                            <input
+                              type="file"
+                              accept=".pdf,.jpg,.jpeg,.png,.webp"
+                              className="hidden"
+                              ref={el => { docFileRefs.current[slot.key] = el; }}
+                              onChange={e => {
+                                const f = e.target.files?.[0];
+                                if (f) handleDocReupload(slot, f);
+                                e.target.value = '';
+                              }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Sync notice */}
+              <div className="flex items-start gap-2 p-3 rounded-xl border border-[hsl(265_80%_55%/0.15)] bg-[hsl(265_80%_55%/0.04)] text-[11px] text-muted-foreground">
+                <Database size={11} className="text-[hsl(265,80%,70%)] flex-shrink-0 mt-0.5" />
+                <span>
+                  All uploads are stored in the encrypted <span className="text-[hsl(265,80%,70%)] font-medium">identity-docs</span> bucket.
+                  Storage paths are AES-256 encrypted before being saved to the Credential Vault.
+                  The <span className="text-[hsl(185,100%,55%)] font-medium">identity completeness score</span> and
+                  <span className="text-[hsl(185,100%,55%)] font-medium"> has_id_document flag</span> sync automatically after every upload.
+                  Autopilots access documents only during consent-approved actions.
+                </span>
+              </div>
             </div>
           )}
 
