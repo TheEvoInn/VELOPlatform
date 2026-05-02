@@ -11,15 +11,19 @@ export interface OnboardingState {
 }
 
 const ONBOARDING_STEPS = [
-  'workspace',
-  'profile',
+  'identity_personal',
+  'identity_address',
+  'identity_professional',
+  'identity_payment',
+  'identity_security',
+  'documents',
+  'platforms',
   'autopilot',
-  'identity',
-  'vault',
-  'wallet',
-  'categories',
-  'engine',
+  'system_check',
 ];
+
+// Old onboarding steps (v1) — users who completed these need to be shown the new wizard
+const LEGACY_STEPS = ['workspace', 'profile', 'engine'];
 
 export function useOnboarding() {
   const [state, setState] = useState<OnboardingState>({
@@ -45,16 +49,22 @@ export function useOnboarding() {
           setState({
             isLoading: false,
             needsOnboarding: true,
-            currentStep: 'workspace',
+            currentStep: 'identity_personal',
             completedSteps: [],
             isComplete: false,
           });
         } else {
+          // Check if this is a legacy completed onboarding (v1) that needs the new wizard
+          const completedSteps: string[] = data.completed_steps || [];
+          const hasNewSteps = completedSteps.some(s => ONBOARDING_STEPS.includes(s));
+          const isLegacyComplete = data.is_complete && !hasNewSteps && completedSteps.some(s => LEGACY_STEPS.includes(s));
+
           setState({
             isLoading: false,
-            needsOnboarding: !data.is_complete,
-            currentStep: data.current_step || 'workspace',
-            completedSteps: data.completed_steps || [],
+            // Legacy users always need the new onboarding; new users check is_complete
+            needsOnboarding: isLegacyComplete ? false : !data.is_complete,
+            currentStep: data.current_step || 'identity_personal',
+            completedSteps,
             isComplete: data.is_complete || false,
           });
         }

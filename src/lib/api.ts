@@ -213,6 +213,26 @@ export interface UserIdentity {
   missing_fields?: string[];
   created_at?: string;
   updated_at?: string;
+  // Extended real-world fields
+  address_line1?: string;
+  address_line2?: string;
+  postal_code?: string;
+  tax_id?: string;
+  tax_country?: string;
+  payment_paypal?: string;
+  payment_bank_account?: string;
+  payment_wise?: string;
+  payment_crypto_address?: string;
+  security_question_1?: string;
+  security_answer_1?: string;
+  security_question_2?: string;
+  security_answer_2?: string;
+  id_document_type?: string;
+  id_document_number?: string;
+  id_document_expiry?: string;
+  professional_title?: string;
+  employer?: string;
+  work_authorization?: string;
 }
 
 export async function getUserIdentity(): Promise<{ data: UserIdentity | null; error: string | null }> {
