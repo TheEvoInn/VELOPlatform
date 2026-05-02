@@ -1400,7 +1400,7 @@ export default function BrowserAutomationPage() {
                 const Ic = EVENT_ICONS[evt.type] ?? Activity;
                 return (
                   <div key={i} className="flex items-start gap-3 p-2.5 rounded-lg border border-[hsl(var(--border))]">
-                    <div className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: `color-mix(in srgb, ${Object.entries(EVENT_COLORS).find(([k]) => k === evt.type)?.[1]?.replace('text-[', '').replace(']', '') ?? 'transparent'} 12%, transparent)` }}>
+                    <div className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: `color-mix(in srgb, ${Object.entries(EVENT_COLORS).find(([k]) => k === evt.type)?.[1]?.replace(/text-\[/g, '').replace(/\]/g, '') ?? 'transparent'} 12%, transparent)` }}>
                       <Ic size={11} className={EVENT_COLORS[evt.type] ?? 'text-muted-foreground'} />
                     </div>
                     <div className="flex-1 min-w-0">
