@@ -178,6 +178,37 @@ export async function getDropshipOrdersFromDB() {
   return supabase.from('dropship_orders').select('*').order('created_at', { ascending: false });
 }
 
+// ─── User Documents (cross-module sync) ────────────────────────────────────
+export interface UserDocument {
+  id: string;
+  doc_key: string;
+  doc_type: string;
+  doc_label: string;
+  storage_path: string;
+  file_name: string;
+  file_size: number;
+  mime_type: string;
+  verification_status: string;
+  source: string;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+}
+
+export async function getUserDocuments(): Promise<{ data: UserDocument[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from('user_documents')
+    .select('*')
+    .order('created_at', { ascending: false });
+  return { data: (data as UserDocument[]) ?? [], error: error?.message ?? null };
+}
+
+export async function getDocumentSignedUrl(storagePath: string): Promise<string | null> {
+  const { data } = await supabase.storage
+    .from('identity-docs')
+    .createSignedUrl(storagePath, 3600);
+  return data?.signedUrl ?? null;
+}
+
 // ─── User Identity ────────────────────────────────────────────────────────────
 export interface UserIdentity {
   id?: string;

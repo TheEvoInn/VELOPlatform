@@ -2,12 +2,13 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Lock, Plus, Eye, EyeOff, Trash2, Key, Globe, Wallet as WalletIcon,
   FileText, Shield, RefreshCw, Clock, Upload, CheckCircle, AlertTriangle,
-  Image, X, ExternalLink, Copy, KeyRound,
+  Image, X, ExternalLink, Copy, KeyRound, AlertCircle,
 } from 'lucide-react';
 import StatCard from '@/components/features/StatCard';
-import { getCredentialsFromDB, addCredential, getUserIdentity, upsertUserIdentity } from '@/lib/api';
+import { getCredentialsFromDB, addCredential, getUserIdentity } from '@/lib/api';
 import { supabase } from '@/lib/supabase';
 import { getVaultKey, encryptVaultValue, decryptVaultValue, clearVaultKeyCache } from '@/lib/vaultCrypto';
+import { useDocumentUpload } from '@/hooks/useDocumentUpload';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { useNavigate } from 'react-router-dom';
@@ -78,10 +79,20 @@ export default function VaultPage() {
   const [adding, setAdding] = useState(false);
 
   // ID upload state
-  const [uploading, setUploading] = useState(false);
   const [idFile, setIdFile] = useState<File | null>(null);
   const [idType, setIdType] = useState<'passport' | 'national_id' | 'drivers_license' | 'work_permit'>('passport');
   const [idPreview, setIdPreview] = useState<string | null>(null);
+
+  // Document upload hook — handles storage + metadata + vault + identity sync
+  const idUploadHook = useDocumentUpload({
+    docKey: idType,
+    docLabel: idType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+    docType: 'government_id',
+    source: 'vault',
+    saveToVault: true,
+    isIdDocument: true,
+    maxRetries: 3,
+  });
 
   // ── Initialize vault key from current user ───────────────────────────────
   useEffect(() => {
@@ -230,48 +241,19 @@ export default function VaultPage() {
 
   const handleIdUpload = async () => {
     if (!idFile) { toast.error('Select a document to upload'); return; }
-    setUploading(true);
 
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) { toast.error('Not authenticated'); setUploading(false); return; }
+    const success = await idUploadHook.upload(idFile);
 
-    const ext = idFile.name.split('.').pop() || 'pdf';
-    const path = `identity-documents/${user.id}/${idType}_${Date.now()}.${ext}`;
-
-    const { error: uploadError } = await supabase.storage
-      .from('identity-docs')
-      .upload(path, idFile, { cacheControl: '3600', upsert: true });
-
-    if (uploadError) {
-      toast.error('Upload failed: ' + uploadError.message);
-      setUploading(false);
-      return;
-    }
-
-    // Encrypt the storage path before saving to credentials
-    const encryptedPath = await encryptValue(path);
-
-    const { error: credError } = await addCredential({
-      name: `${idType.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())} — ${idFile.name}`,
-      type: 'id_document',
-      platform: 'Identity Vault',
-      encrypted_data: encryptedPath,
-      is_encrypted: true,
-    });
-
-    if (!credError) {
-      await upsertUserIdentity({ has_id_document: true });
+    if (success) {
       setHasIdDoc(true);
       toast.success('Identity document encrypted and stored — Autopilot eligibility unlocked');
       setShowIdUpload(false);
       setIdFile(null);
       setIdPreview(null);
+      idUploadHook.reset();
       await loadCredentials();
-    } else {
-      toast.error('Failed to record document');
     }
-
-    setUploading(false);
+    // Errors are handled inside the hook with descriptive toast messages
   };
 
   const logins  = credentials.filter(c => c.type === 'login').length;
@@ -620,19 +602,47 @@ export default function VaultPage() {
               )}
             </div>
 
-            <div className="flex gap-3 mt-5">
-              <button onClick={() => { setShowIdUpload(false); setIdFile(null); setIdPreview(null); }}
-                className="flex-1 py-2 rounded-lg text-sm font-semibold bg-[hsl(228_25%_10%)] border border-[hsl(var(--border))] text-muted-foreground hover:text-foreground transition-colors">
-                Cancel
-              </button>
-              <button
-                onClick={handleIdUpload}
-                disabled={uploading || !idFile}
-                className="flex-1 py-2 rounded-lg text-sm font-bold bg-gradient-to-r from-violet-500 to-cyan-500 text-black hover:opacity-90 disabled:opacity-60 transition-all flex items-center justify-center gap-2"
-              >
-                {uploading ? <RefreshCw size={14} className="animate-spin" /> : <Lock size={14} />}
-                {uploading ? 'Encrypting & Uploading...' : 'Encrypt & Store'}
-              </button>
+            <div className="flex flex-col gap-3 mt-5">
+              {/* Progress bar */}
+              {idUploadHook.state.status === 'uploading' && (
+                <div>
+                  <div className="flex justify-between text-[10px] text-muted-foreground mb-1">
+                    <span>Uploading & encrypting...</span>
+                    <span>{idUploadHook.state.progress}%</span>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-[hsl(228_25%_15%)] overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all duration-300"
+                      style={{ width: `${idUploadHook.state.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+              {/* Error message */}
+              {idUploadHook.state.status === 'error' && (
+                <div className="flex items-start gap-2 p-3 rounded-lg bg-[hsl(0_85%_60%/0.08)] border border-[hsl(0_85%_60%/0.2)] text-xs text-[hsl(0,85%,65%)]">
+                  <AlertCircle size={12} className="flex-shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-semibold mb-0.5">Upload failed</div>
+                    <div className="opacity-80">{idUploadHook.state.error}</div>
+                  </div>
+                </div>
+              )}
+              {/* Action buttons */}
+              <div className="flex gap-3">
+                <button onClick={() => { setShowIdUpload(false); setIdFile(null); setIdPreview(null); idUploadHook.reset(); }}
+                  className="flex-1 py-2 rounded-lg text-sm font-semibold bg-[hsl(228_25%_10%)] border border-[hsl(var(--border))] text-muted-foreground hover:text-foreground transition-colors">
+                  Cancel
+                </button>
+                <button
+                  onClick={handleIdUpload}
+                  disabled={idUploadHook.state.status === 'uploading' || !idFile}
+                  className="flex-1 py-2 rounded-lg text-sm font-bold bg-gradient-to-r from-violet-500 to-cyan-500 text-black hover:opacity-90 disabled:opacity-60 transition-all flex items-center justify-center gap-2"
+                >
+                  {idUploadHook.state.status === 'uploading' ? <RefreshCw size={14} className="animate-spin" /> : <Lock size={14} />}
+                  {idUploadHook.state.status === 'uploading' ? `Uploading... ${idUploadHook.state.progress}%` : 'Encrypt & Store'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

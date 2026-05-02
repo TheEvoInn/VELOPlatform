@@ -11,7 +11,7 @@ import {
   Rocket, User, MapPin, Briefcase, CreditCard, Shield, Upload,
   Globe, Bot, CheckCircle, ChevronRight, X, Lock, Eye, EyeOff,
   AlertTriangle, RefreshCw, Plus, Trash2, FileText, Image as ImageIcon,
-  Zap, Star, Cpu, Target, Activity, Check, Package
+  Zap, Star, Cpu, Target, Activity, Check, Package, AlertCircle
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { supabase } from '@/lib/supabase';
@@ -222,32 +222,100 @@ export default function OnboardingFlow({ onComplete, onSkip }: OnboardingFlowPro
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Document upload handler
+  // Document upload handler — uploads File directly (no blob URL roundtrip)
   // ─────────────────────────────────────────────────────────────────────────
   const handleFileSelect = useCallback(async (key: string, file: File) => {
+    // Validate immediately
+    const ALLOWED = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'application/pdf'];
+    if (!ALLOWED.includes(file.type)) {
+      toast.error(`File type "${file.type}" not supported. Use JPG, PNG, WEBP, or PDF.`);
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error(`File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum is 5MB.`);
+      return;
+    }
+    if (file.size === 0) {
+      toast.error('File is empty — select a valid document.');
+      return;
+    }
+
     setDocs(prev => prev.map(d => d.key === key ? { ...d, file, status: 'uploading' } : d));
 
     const { data: { user } } = await supabase.auth.getUser();
-    if (!user) { setDocs(prev => prev.map(d => d.key === key ? { ...d, status: 'error' } : d)); return; }
-
-    const path = `identity-documents/${user.id}/${key}_${Date.now()}.${file.name.split('.').pop()}`;
-
-    const response = await fetch(URL.createObjectURL(file));
-    const blob = await response.blob();
-    const { error } = await supabase.storage.from('identity-docs').upload(path, blob, {
-      contentType: file.type,
-      upsert: true,
-    });
-
-    if (error) {
-      console.error('[onboarding] upload error:', error);
+    if (!user) {
       setDocs(prev => prev.map(d => d.key === key ? { ...d, status: 'error' } : d));
-    } else {
-      const { data: urlData } = supabase.storage.from('identity-docs').getPublicUrl(path);
-      setDocs(prev => prev.map(d =>
-        d.key === key ? { ...d, status: 'done', url: urlData.publicUrl } : d
-      ));
+      toast.error('Authentication required — please log in again.');
+      return;
     }
+
+    // Build storage path matching RLS policy:
+    // folder[1] = 'identity-documents', folder[2] = user.id
+    const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
+    const safeKey = key.replace(/[^a-z0-9_-]/gi, '_');
+    const path = `identity-documents/${user.id}/${safeKey}_${Date.now()}.${ext}`;
+
+    console.log(`[OnboardingFlow] Uploading ${file.name} to ${path} (${file.size} bytes)`);
+
+    // Upload File directly — File IS a Blob, no fetch(URL.createObjectURL()) needed
+    let uploadErr: string | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const { error } = await supabase.storage
+        .from('identity-docs')
+        .upload(path, file, {                // Direct File upload
+          contentType: file.type,
+          upsert: true,
+        });
+
+      if (!error) {
+        uploadErr = null;
+        break;
+      }
+      uploadErr = error.message;
+      console.error(`[OnboardingFlow] Upload attempt ${attempt} failed:`, error.message);
+      if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
+    }
+
+    if (uploadErr) {
+      console.error('[OnboardingFlow] All upload attempts failed:', uploadErr);
+      setDocs(prev => prev.map(d => d.key === key ? { ...d, status: 'error' } : d));
+      toast.error(`Upload failed: ${uploadErr}`);
+      return;
+    }
+
+    // Save metadata to user_documents table
+    await supabase.from('user_documents').upsert({
+      user_id:    user.id,
+      doc_key:    key,
+      doc_type:   key.includes('gov_id') ? 'government_id' : key === 'resume' ? 'resume' : key === 'portfolio' ? 'portfolio' : 'other',
+      doc_label:  DOC_SLOTS.find(d => d.key === key)?.label || key,
+      storage_path: path,
+      file_name:  file.name,
+      file_size:  file.size,
+      mime_type:  file.type,
+      verification_status: 'uploaded',
+      source:     'onboarding',
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,doc_key' });
+
+    // If ID doc, update has_id_document flag
+    if (key.includes('gov_id')) {
+      await supabase.from('user_identity').upsert(
+        { user_id: user.id, has_id_document: true, updated_at: new Date().toISOString() },
+        { onConflict: 'user_id' }
+      );
+    }
+
+    // Get signed URL for preview (bucket is private)
+    const { data: signedData } = await supabase.storage
+      .from('identity-docs')
+      .createSignedUrl(path, 3600);
+
+    setDocs(prev => prev.map(d =>
+      d.key === key ? { ...d, status: 'done', url: signedData?.signedUrl || path } : d
+    ));
+
+    console.log(`[OnboardingFlow] Upload complete: ${path}`);
   }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
