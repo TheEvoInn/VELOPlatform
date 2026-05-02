@@ -83,16 +83,8 @@ export default function VaultPage() {
   const [idType, setIdType] = useState<'passport' | 'national_id' | 'drivers_license' | 'work_permit'>('passport');
   const [idPreview, setIdPreview] = useState<string | null>(null);
 
-  // Document upload hook — handles storage + metadata + vault + identity sync
-  const idUploadHook = useDocumentUpload({
-    docKey: idType,
-    docLabel: idType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-    docType: 'government_id',
-    source: 'vault',
-    saveToVault: true,
-    isIdDocument: true,
-    maxRetries: 3,
-  });
+  // Document upload hook — options are passed at call-time so idType changes are always reflected
+  const idUploadHook = useDocumentUpload({ saveToVault: true, maxRetries: 3 });
 
   // ── Initialize vault key from current user ───────────────────────────────
   useEffect(() => {
@@ -242,7 +234,15 @@ export default function VaultPage() {
   const handleIdUpload = async () => {
     if (!idFile) { toast.error('Select a document to upload'); return; }
 
-    const success = await idUploadHook.upload(idFile);
+    // Pass current idType at call-time so dynamic type selection is always honoured
+    const docLabel = idType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    const success = await idUploadHook.upload(idFile, {
+      docKey:       idType,
+      docLabel,
+      docType:      'government_id',
+      isIdDocument: true,
+      source:       'vault',
+    });
 
     if (success) {
       setHasIdDoc(true);

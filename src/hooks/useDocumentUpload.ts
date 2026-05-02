@@ -1,3 +1,4 @@
+
 /**
  * VELO 2.0 — Unified Document Upload Hook
  * Handles all document uploads: file → storage → metadata → identity sync → vault reference
@@ -21,11 +22,11 @@ import { toast } from 'sonner';
 // ─────────────────────────────────────────────────────────────────────────────
 export interface DocumentUploadOptions {
   /** Unique key for this document slot, e.g. 'gov_id_front', 'resume' */
-  docKey: string;
+  docKey?: string;
   /** Human-readable label */
-  docLabel: string;
+  docLabel?: string;
   /** Document type category */
-  docType: 'government_id' | 'proof_of_address' | 'resume' | 'portfolio' | 'certificate' | 'other';
+  docType?: 'government_id' | 'proof_of_address' | 'resume' | 'portfolio' | 'certificate' | 'other';
   /** Where the upload was initiated */
   source?: 'vault' | 'onboarding' | 'identity_studio';
   /** If true, encrypt the storage path in credentials table */
@@ -34,6 +35,15 @@ export interface DocumentUploadOptions {
   isIdDocument?: boolean;
   /** Maximum retries (default 3) */
   maxRetries?: number;
+}
+
+/** Options that can be passed at upload-call time to override hook-level options */
+export interface UploadCallOptions {
+  docKey?: string;
+  docLabel?: string;
+  docType?: DocumentUploadOptions['docType'];
+  isIdDocument?: boolean;
+  source?: DocumentUploadOptions['source'];
 }
 
 export interface DocumentUploadState {
@@ -74,13 +84,25 @@ function sleep(ms: number) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook
 // ─────────────────────────────────────────────────────────────────────────────
-export function useDocumentUpload(options: DocumentUploadOptions) {
+export function useDocumentUpload(options: DocumentUploadOptions = {}) {
   const [state, setState] = useState<DocumentUploadState>({ status: 'idle', progress: 0 });
   const abortRef = useRef<boolean>(false);
 
-  const { docKey, docLabel, docType, source = 'vault', saveToVault = true, isIdDocument = false, maxRetries = 3 } = options;
+  // Store mutable options in a ref so upload() always reads the latest values
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
 
-  const upload = useCallback(async (file: File): Promise<boolean> => {
+  const upload = useCallback(async (file: File, callOptions?: UploadCallOptions): Promise<boolean> => {
+    // Merge hook-level options with call-time overrides — call-time wins
+    const resolvedDocKey      = callOptions?.docKey      ?? optionsRef.current.docKey      ?? 'document';
+    const resolvedDocLabel    = callOptions?.docLabel    ?? optionsRef.current.docLabel    ?? 'Document';
+    const resolvedDocType     = callOptions?.docType     ?? optionsRef.current.docType     ?? 'other';
+    const resolvedIsIdDocument = callOptions?.isIdDocument ?? optionsRef.current.isIdDocument ?? false;
+    const resolvedSource      = callOptions?.source      ?? optionsRef.current.source      ?? 'vault';
+
+    // Destructure `maxRetries` and `saveToVault` from `optionsRef.current`
+    const { maxRetries = 3, saveToVault = true } = optionsRef.current;
+
     abortRef.current = false;
 
     // ── 1. Validate file ─────────────────────────────────────────────────
@@ -117,9 +139,10 @@ export function useDocumentUpload(options: DocumentUploadOptions) {
 
     // ── 3. Build storage path (matches RLS policy pattern) ────────────────
     // Policy requires: folder[1] = 'identity-documents', folder[2] = user.id
+    // Use stable key (no timestamp) so re-uploads replace the same file via upsert
     const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
-    const safeKey = docKey.replace(/[^a-z0-9_-]/gi, '_');
-    const storagePath = `identity-documents/${user.id}/${safeKey}_${Date.now()}.${ext}`;
+    const safeKey = resolvedDocKey.replace(/[^a-z0-9_-]/gi, '_');
+    const storagePath = `identity-documents/${user.id}/${safeKey}.${ext}`;
 
     setState(s => ({ ...s, progress: 20 }));
 
@@ -167,15 +190,15 @@ export function useDocumentUpload(options: DocumentUploadOptions) {
       .from('user_documents')
       .upsert({
         user_id: user.id,
-        doc_key: docKey,
-        doc_type: docType,
-        doc_label: docLabel,
+        doc_key: resolvedDocKey,
+        doc_type: resolvedDocType,
+        doc_label: resolvedDocLabel,
         storage_path: storagePath,
         file_name: file.name,
         file_size: file.size,
         mime_type: file.type,
         verification_status: 'uploaded',
-        source,
+        source: resolvedSource,
         metadata: {
           uploaded_at: new Date().toISOString(),
           original_name: file.name,
@@ -192,7 +215,7 @@ export function useDocumentUpload(options: DocumentUploadOptions) {
     setState(s => ({ ...s, progress: 80 }));
 
     // ── 6. Update identity flag for government ID types ──────────────────
-    if (isIdDocument || docType === 'government_id') {
+    if (resolvedIsIdDocument || resolvedDocType === 'government_id') {
       const { error: identErr } = await supabase
         .from('user_identity')
         .upsert(
@@ -210,20 +233,23 @@ export function useDocumentUpload(options: DocumentUploadOptions) {
     setState(s => ({ ...s, progress: 88 }));
 
     // ── 7. Save encrypted path reference to Credentials Vault ────────────
+    // Use a STABLE credential name (docKey-based, not filename-based) so re-uploads
+    // always upsert the same credential entry instead of creating duplicates
     let credentialId: string | undefined;
     if (saveToVault) {
+      const stableCredName = `[ID Vault] ${resolvedDocLabel}`;
+      const credType = (resolvedIsIdDocument || resolvedDocType === 'government_id') ? 'id_document' : 'document';
+
       try {
         const vaultKey = await getVaultKey(user.id, user.email ?? user.id);
         const encryptedPath = await encryptVaultValue(storagePath, vaultKey);
-
-        const credName = `${docLabel} — ${file.name.slice(0, 40)}`;
 
         const { data: credData, error: credError } = await supabase
           .from('credentials')
           .upsert({
             user_id: user.id,
-            name: credName,
-            type: isIdDocument || docType === 'government_id' ? 'id_document' : 'document',
+            name: stableCredName,
+            type: credType,
             platform: 'Identity Vault',
             encrypted_data: encryptedPath,
             is_encrypted: true,
@@ -237,7 +263,7 @@ export function useDocumentUpload(options: DocumentUploadOptions) {
           toast.warning('Document stored in storage, but Vault reference save failed. Document is safe.');
         } else {
           credentialId = credData?.id;
-          console.log('[useDocumentUpload] Vault credential created:', credentialId);
+          console.log('[useDocumentUpload] Vault credential created/updated:', credentialId);
         }
       } catch (vaultErr) {
         console.error('[useDocumentUpload] Vault encryption error:', vaultErr);
@@ -248,8 +274,8 @@ export function useDocumentUpload(options: DocumentUploadOptions) {
           .from('credentials')
           .upsert({
             user_id: user.id,
-            name: `${docLabel} — ${file.name.slice(0, 40)}`,
-            type: isIdDocument || docType === 'government_id' ? 'id_document' : 'document',
+            name: stableCredName,
+            type: credType,
             platform: 'Identity Vault',
             encrypted_data: btoa(storagePath),
             is_encrypted: false,
@@ -281,7 +307,7 @@ export function useDocumentUpload(options: DocumentUploadOptions) {
     console.log('[useDocumentUpload] Complete:', { storagePath, credentialId });
     return true;
 
-  }, [docKey, docLabel, docType, source, saveToVault, isIdDocument, maxRetries]);
+  }, []); // Empty dependency array as optionsRef.current is stable within the callback
 
   const reset = useCallback(() => {
     abortRef.current = true;

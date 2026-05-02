@@ -168,9 +168,10 @@ export default function IdentityStudioPage() {
       return;
     }
 
+    // Stable path — no timestamp, so re-uploads upsert the same storage object
     const ext     = file.name.split('.').pop()?.toLowerCase() || 'bin';
     const safeKey = slot.key.replace(/[^a-z0-9_-]/gi, '_');
-    const path    = `identity-documents/${user.id}/${safeKey}_${Date.now()}.${ext}`;
+    const path    = `identity-documents/${user.id}/${safeKey}.${ext}`;
 
     // Upload with retry
     let uploadErr: string | null = null;
@@ -213,11 +214,11 @@ export default function IdentityStudioPage() {
       );
     }
 
-    // Save encrypted path to Vault
+    // Save encrypted path to Vault — stable name so re-uploads upsert, not duplicate
     try {
       const vaultKey   = await getVaultKey(user.id, user.email ?? user.id);
       const encPath    = await encryptVaultValue(path, vaultKey);
-      const credName   = `${slot.label} — ${file.name.slice(0, 40)}`;
+      const credName   = `[ID Vault] ${slot.label}`;
       await supabase.from('credentials').upsert({
         user_id: user.id, name: credName,
         type: slot.isIdDoc ? 'id_document' : 'document',

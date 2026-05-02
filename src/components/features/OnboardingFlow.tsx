@@ -249,11 +249,10 @@ export default function OnboardingFlow({ onComplete, onSkip }: OnboardingFlowPro
       return;
     }
 
-    // Build storage path matching RLS policy:
-    // folder[1] = 'identity-documents', folder[2] = user.id
+    // Build storage path matching RLS policy — stable key (no timestamp) so re-uploads replace same file
     const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
     const safeKey = key.replace(/[^a-z0-9_-]/gi, '_');
-    const path = `identity-documents/${user.id}/${safeKey}_${Date.now()}.${ext}`;
+    const path = `identity-documents/${user.id}/${safeKey}.${ext}`;
 
     console.log(`[OnboardingFlow] Uploading ${file.name} to ${path} (${file.size} bytes)`);
 
