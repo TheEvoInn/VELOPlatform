@@ -18,12 +18,14 @@
  */
 
 import { generateAIContent, type GenerateContentParams } from '@/lib/api';
+import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 export type AIMode = 'cloud' | 'local' | 'hybrid' | 'cost_optimized';
+export type AITier = 'cloud' | 'backend_ollama' | 'local_ollama' | 'template';
 
 export interface OllamaModel {
   name: string;
@@ -615,6 +617,104 @@ export async function pullOllamaModel(
 
   } catch (err) {
     return { error: `Pull error: ${(err as Error).message}` };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Backend AI Runtime — routes through the ai-runtime Edge Function
+// This provides: Cloud AI + Remote Ollama + Template Engine tiers
+// ─────────────────────────────────────────────────────────────────────────────
+export interface BackendRuntimeResult {
+  text: string | null;
+  error: string | null;
+  tier_used: 'cloud' | 'ollama' | 'template';
+  credit_exhausted?: boolean;
+}
+
+export async function generateViaBackendRuntime(
+  contentType: string,
+  context: Record<string, unknown>,
+  systemPrompt?: string,
+  userPrompt?: string,
+  preferTier?: 'cloud' | 'ollama' | 'template',
+  maxTokens = 512,
+): Promise<BackendRuntimeResult> {
+  try {
+    const { data, error } = await supabase.functions.invoke('ai-runtime', {
+      body: {
+        action: 'generate',
+        content_type: contentType,
+        context,
+        system_prompt: systemPrompt,
+        user_prompt: userPrompt,
+        prefer_tier: preferTier,
+        max_tokens: maxTokens,
+      },
+    });
+
+    if (error) {
+      return { text: null, error: error.message, tier_used: 'template' };
+    }
+
+    if (data?.credit_exhausted) {
+      _setState({ cloudCreditsOk: false, forcedLocalMode: true });
+      localStorage.setItem(LS_KEY_CLOUD_OK, 'false');
+    }
+
+    return {
+      text: data?.text ?? null,
+      error: data?.text ? null : 'No response from runtime',
+      tier_used: data?.tier_used ?? 'template',
+      credit_exhausted: data?.credit_exhausted,
+    };
+  } catch (err) {
+    return { text: null, error: String(err), tier_used: 'template' };
+  }
+}
+
+export async function devAssistViaRuntime(
+  intent: string,
+  codeContext: string,
+  resolvedFiles: Array<{ name: string; id: string }>,
+  conversationHistory: Array<{ role: string; content: string }>,
+): Promise<{ text: string | null; error: string | null; tier_used: string }> {
+  try {
+    const { data, error } = await supabase.functions.invoke('ai-runtime', {
+      body: {
+        action: 'dev_assist',
+        intent,
+        code_context: codeContext,
+        resolved_files: resolvedFiles,
+        dev_messages: conversationHistory,
+      },
+    });
+
+    if (error) return { text: null, error: error.message, tier_used: 'template' };
+    return {
+      text: data?.text ?? null,
+      error: data?.text ? null : 'No response',
+      tier_used: data?.tier_used ?? 'template',
+    };
+  } catch (err) {
+    return { text: null, error: String(err), tier_used: 'template' };
+  }
+}
+
+export async function getBackendRuntimeStatus(): Promise<{
+  cloud: boolean; ollama: boolean; template: boolean; activeTier: string;
+}> {
+  try {
+    const { data } = await supabase.functions.invoke('ai-runtime', {
+      body: { action: 'status' },
+    });
+    return {
+      cloud: data?.tiers?.cloud?.available ?? false,
+      ollama: data?.tiers?.ollama?.available ?? false,
+      template: true,
+      activeTier: data?.active_tier ?? 'template',
+    };
+  } catch {
+    return { cloud: false, ollama: false, template: true, activeTier: 'template' };
   }
 }
 

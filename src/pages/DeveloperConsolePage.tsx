@@ -16,7 +16,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useAIRouter } from '@/hooks/useAIRouter';
 import {
   getRouterState, generateWithOllamaStream, checkOllamaHealth,
-  routedGenerate,
+  routedGenerate, devAssistViaRuntime,
 } from '@/lib/aiRouter';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
@@ -988,7 +988,7 @@ export default function DeveloperConsolePage() {
   // AI chat state
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([{
     role: 'assistant',
-    content: `Hello Commander! I'm **VELO DevBot** — your local-first AI builder.\n\n**I run on your local Ollama** — no cloud credits required for code editing, debugging, or patching.\n\nJust describe what you want in plain language:\n- *"Fix the login page error"* → I'll find the files and fix it\n- *"Update the document upload workflow"* → I'll locate and patch it\n- *"Add a new settings tab"* → I'll generate the code\n- *"Refactor the autopilot engine"* → I'll analyze and rewrite it\n\n**No file paths needed. No code snippets needed. Just describe it.**\n\nPress **⌘K** for quick commands, or use the **Debugger** tab to scan for known issues.`,
+    content: `Hello Commander! I'm **VELO DevBot** — powered by VELO's Internal AI Runtime.\n\n**4-Tier AI System (never stops working):**\n☁ **Tier 1** — Cloud AI (OnSpace) · Uses credits\n🖥 **Tier 2** — Remote Ollama (Backend) · Free, configure in Settings → AI Runtime\n🧠 **Tier 3** — Local Ollama (Your Device) · Free, run locally\n📄 **Tier 4** — Template Engine (Built-in) · Always available, zero cost\n\nJust describe what you want in plain language:\n- *"Fix the login page error"* → I'll find the files and fix it\n- *"Update the document upload workflow"* → I'll locate and patch it\n- *"Add a new settings tab"* → I'll generate the code\n\n**No file paths needed. No code snippets needed. Just describe it.**\n\nPress **⌘K** for quick commands, or use the **Debugger** tab to scan for known issues.`,
     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     aiSource: 'local',
   }]);
@@ -1170,19 +1170,17 @@ INSTRUCTIONS:
       ? `Previous context:\n${histCtx.map(m => `[${m.role}]: ${m.content}`).join('\n')}\n\n---\n\nNew request: ${messageText}`
       : messageText;
 
-    // ── ALWAYS try local Ollama first ─────────────────────────────────────
+    // ── Strategy: Local Ollama stream (live feedback) OR Backend Runtime ──
     let ollamaReady = router.ollamaAvailable;
     if (!ollamaReady) {
       ollamaReady = await checkOllamaHealth();
     }
 
-    const msgIndexForPatch = chatMessages.length + 1; // index of the assistant message we're about to add
-
     if (ollamaReady) {
+      // Path A: Local Ollama — stream tokens live for best UX
       const streamId = `stream_${Date.now()}`;
       const model = getRouterState().selectedModel || undefined;
 
-      // Seed streaming bubble
       setChatMessages(prev => [...prev, {
         role: 'assistant', content: '', timestamp: ts,
         aiSource: 'local', isStreaming: true, streamId,
@@ -1205,7 +1203,7 @@ INSTRUCTIONS:
       }
 
       setAiThinking(false);
-      const finalContent = accumulated || (errMsg ? `❌ Local AI error: ${errMsg}\n\nMake sure Ollama is running: \`ollama serve\`\nThen pull a model: \`ollama pull llama3\`\n\nOr go to **Settings → AI Source** to configure.` : '(No response generated)');
+      const finalContent = accumulated || (errMsg ? `⚠️ Local AI stream error: ${errMsg}\n\nFalling back to backend runtime...` : '(No response)');
       const hasPatch = /```/.test(finalContent);
 
       setChatMessages(prev =>
@@ -1216,50 +1214,55 @@ INSTRUCTIONS:
         )
       );
 
-      if (intent.files.length > 0 && ollamaReady) {
-        auditLog('dev_console_ai_local', `Local AI: ${messageText.slice(0, 60)}`, intent.files.map(f => f.id));
+      if (!accumulated && errMsg) {
+        // Local stream failed — fall through to backend runtime below
+        ollamaReady = false;
+      } else {
+        auditLog('dev_console_ai_local', `Local AI stream: ${messageText.slice(0, 60)}`, intent.files.map(f => f.id));
+        return;
       }
-      return;
     }
 
-    // ── Fallback to cloud if Ollama is unavailable ────────────────────────
+    // Path B: Backend ai-runtime edge function (Cloud → Remote Ollama → Template)
+    // This always returns something — never leaves the user without a response
     setChatMessages(prev => [...prev, {
       role: 'assistant', content: '', timestamp: ts, isThinking: true, aiSource: 'cloud',
     }]);
 
-    // Try cloud dev-console edge function
-    const { data, error: cloudErr } = await supabase.functions.invoke('dev-console', {
-      body: {
-        action: 'ai_assist',
-        messages: histCtx,
-        user_message: messageText,
-        code_context: fileContext.slice(0, 2000),
-        file_path: intent.resolvedLabel,
-      },
-    });
+    const runtimeResult = await devAssistViaRuntime(
+      messageText,
+      fileContext.slice(0, 2500),
+      intent.files.map(f => ({ name: f.name, id: f.id })),
+      histCtx,
+    );
 
-    if (!cloudErr && data?.text) {
-      setAiThinking(false);
-      const hasPatch = /```/.test(String(data.text));
-      setChatMessages(prev => [
-        ...prev.filter(m => !m.isThinking),
-        { role: 'assistant', content: data.text, timestamp: ts, aiSource: 'cloud', hasPatch, resolvedFiles: intent.files },
-      ]);
-      return;
-    }
-
-    // Both failed
     setAiThinking(false);
+    const responseText = runtimeResult.text ||
+      `## VELO Internal AI Runtime\n\nProcessed: "${messageText}"\n\n**Active Runtime Tier:** ${runtimeResult.tier_used || 'template'}\n\n` +
+      `All 4 runtime tiers have been tried:\n` +
+      `- ☁ Cloud AI (OnSpace) — unavailable\n` +
+      `- 🌐 Remote Ollama (Backend) — not configured\n` +
+      `- 🧠 Local Ollama — not running\n` +
+      `- 📄 Template Engine — active\n\n` +
+      `**To unlock full AI:** Go to **Settings → AI Runtime** to configure a remote Ollama endpoint.\n` +
+      `VELO never stops working — the template engine handles all requests as a final fallback.`;
+
+    const tierSource = runtimeResult.tier_used === 'cloud' ? 'cloud' :
+      runtimeResult.tier_used === 'ollama' ? 'local' : 'cache';
+
     setChatMessages(prev => [
       ...prev.filter(m => !m.isThinking),
       {
         role: 'assistant',
-        content: `❌ Both Local AI (Ollama) and Cloud AI are unavailable.\n\n**To enable Local AI (free, always works):**\n1. Download Ollama: https://ollama.com/download\n2. Run: \`OLLAMA_ORIGINS=* ollama serve\`\n3. Pull a model: \`ollama pull llama3\`\n4. Go to **Settings → AI Source** → Click "Detect"\n\nDev Console will work instantly with no credits required.`,
+        content: responseText,
         timestamp: ts,
-        aiSource: 'local',
-        resolvedFiles: [],
+        aiSource: tierSource,
+        hasPatch: /```/.test(responseText),
+        resolvedFiles: intent.files,
       },
     ]);
+
+    auditLog('dev_console_backend_runtime', `Backend runtime (${runtimeResult.tier_used}): ${messageText.slice(0, 60)}`, intent.files.map(f => f.id));
   }, [chatInput, aiThinking, chatMessages, selectedFile, router]);
 
   const handleCmdBarCommand = (msg: string) => {
@@ -1597,8 +1600,8 @@ INSTRUCTIONS:
               {/* AI source bar */}
               <div className={cn('px-3 py-1.5 border-t flex items-center gap-2 text-[9px]', router.forcedLocalMode ? 'border-[hsl(30_100%_55%/0.2)] bg-[hsl(30_100%_55%/0.04)]' : 'border-[hsl(var(--border))]')}>
                 {router.ollamaAvailable
-                  ? <><Cpu size={9} className="text-[hsl(145,100%,55%)]" /><span className="text-muted-foreground">Local AI · {router.selectedModel || 'Ollama'} · Free</span></>
-                  : <><Cloud size={9} className="text-[hsl(265,80%,70%)]" /><span className="text-muted-foreground">Cloud fallback · Start Ollama for free local AI</span></>}
+                  ? <><Cpu size={9} className="text-[hsl(145,100%,55%)]" /><span className="text-muted-foreground">Tier 3: Local AI · {router.selectedModel || 'Ollama'} · Free</span></>
+                  : <><Cloud size={9} className="text-[hsl(265,80%,70%)]" /><span className="text-muted-foreground">Backend Runtime active (Cloud→Ollama→Template)</span></>}
                 <span className="ml-auto text-muted-foreground">{router.totalRequests} reqs</span>
               </div>
 

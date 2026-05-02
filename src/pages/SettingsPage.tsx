@@ -3,21 +3,23 @@ import {
   Settings, User, Globe, Bell, Shield, Save, RefreshCw, Key,
   Lock, Code2, Database, Zap, AlertTriangle, CheckCircle,
   ExternalLink, CreditCard, Wallet, FileText, ChevronRight, Info,
-  Eye, EyeOff, Copy, Cpu,
+  Eye, EyeOff, Copy, Cpu, Server,
 } from 'lucide-react';
 import AISourcePanel from '@/components/features/AISourcePanel';
+import AIRuntimePanel from '@/components/features/AIRuntimePanel';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 
-type Tab = 'profile' | 'workspace' | 'ai_source' | 'integrations' | 'security' | 'notifications' | 'about';
+type Tab = 'profile' | 'workspace' | 'ai_source' | 'ai_runtime' | 'integrations' | 'security' | 'notifications' | 'about';
 
 const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: 'profile',       label: 'Profile',       icon: User },
   { id: 'workspace',     label: 'Workspace',     icon: Settings },
   { id: 'ai_source',     label: 'AI Source',     icon: Cpu },
+  { id: 'ai_runtime',   label: 'AI Runtime',    icon: Server },
   { id: 'integrations',  label: 'Integrations',  icon: Zap },
   { id: 'security',      label: 'Security',      icon: Shield },
   { id: 'notifications', label: 'Notifications', icon: Bell },
@@ -310,6 +312,19 @@ export default function SettingsPage() {
             {saveWorkspaceMutation.isPending ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
             {saveWorkspaceMutation.isPending ? 'Saving...' : 'Save Workspace'}
           </button>
+        </div>
+      )}
+
+      {/* ── AI Runtime Tab ─────────────────────────────────────────────────────── */}
+      {tab === 'ai_runtime' && (
+        <div className="space-y-2">
+          <div className="glass-panel rounded-xl border border-[hsl(185_100%_50%/0.15)] p-4 flex items-start gap-3 mb-2">
+            <Server size={14} className="text-[hsl(185,100%,55%)] flex-shrink-0 mt-0.5" />
+            <div className="text-xs text-muted-foreground leading-relaxed">
+              <span className="text-[hsl(185,100%,55%)] font-semibold">VELO Internal AI Runtime</span> — A 4-tier AI system that keeps VELO fully operational regardless of credit status. Configure a remote Ollama server for free, unlimited AI generation with no user installation required.
+            </div>
+          </div>
+          <AIRuntimePanel />
         </div>
       )}
 
