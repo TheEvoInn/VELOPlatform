@@ -3,19 +3,21 @@ import {
   Settings, User, Globe, Bell, Shield, Save, RefreshCw, Key,
   Lock, Code2, Database, Zap, AlertTriangle, CheckCircle,
   ExternalLink, CreditCard, Wallet, FileText, ChevronRight, Info,
-  Eye, EyeOff, Copy
+  Eye, EyeOff, Copy, Cpu,
 } from 'lucide-react';
+import AISourcePanel from '@/components/features/AISourcePanel';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 
-type Tab = 'profile' | 'workspace' | 'integrations' | 'security' | 'notifications' | 'about';
+type Tab = 'profile' | 'workspace' | 'ai_source' | 'integrations' | 'security' | 'notifications' | 'about';
 
 const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: 'profile',       label: 'Profile',       icon: User },
   { id: 'workspace',     label: 'Workspace',     icon: Settings },
+  { id: 'ai_source',     label: 'AI Source',     icon: Cpu },
   { id: 'integrations',  label: 'Integrations',  icon: Zap },
   { id: 'security',      label: 'Security',      icon: Shield },
   { id: 'notifications', label: 'Notifications', icon: Bell },
@@ -308,6 +310,21 @@ export default function SettingsPage() {
             {saveWorkspaceMutation.isPending ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
             {saveWorkspaceMutation.isPending ? 'Saving...' : 'Save Workspace'}
           </button>
+        </div>
+      )}
+
+      {/* ── AI Source Tab ──────────────────────────────────────────────────────── */}
+      {tab === 'ai_source' && (
+        <div className="space-y-2">
+          <div className="glass-panel rounded-xl border border-[hsl(145_100%_50%/0.15)] p-4 flex items-start gap-3 mb-2">
+            <Cpu size={14} className="text-[hsl(145,100%,55%)] flex-shrink-0 mt-0.5" />
+            <div className="text-xs text-muted-foreground leading-relaxed">
+              <span className="text-[hsl(145,100%,55%)] font-semibold">Local AI Fallback System</span> — VELO 2.0 stays fully operational even when cloud credits are exhausted.
+              Configure your preferred AI source below. In Hybrid mode, the system automatically switches to your
+              local Ollama instance when cloud AI becomes unavailable — no interruptions, no blocked workflows.
+            </div>
+          </div>
+          <AISourcePanel />
         </div>
       )}
 
@@ -616,7 +633,9 @@ export default function SettingsPage() {
                 { label: 'Build',            val: 'PROD-2026' },
                 { label: 'Access Mode',      val: 'Real-World' },
                 { label: 'Automation',       val: 'Playwright OSS' },
-                { label: 'AI Engine',        val: 'Gemini 3 Flash' },
+                { label: 'Cloud AI',         val: 'Gemini 3 Flash' },
+                { label: 'Local AI',         val: 'Ollama (Free)' },
+                { label: 'AI Router',        val: 'Credit-Aware' },
                 { label: 'Backend',          val: 'OnSpace Cloud' },
                 { label: 'Auth',             val: 'Supabase OTP' },
                 { label: 'Encryption',       val: 'AES-256-GCM' },

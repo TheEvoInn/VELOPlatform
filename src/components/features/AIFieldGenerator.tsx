@@ -1,7 +1,8 @@
 import React, { useState, useCallback } from 'react';
-import { Sparkles, RefreshCw, CheckCircle, X, ChevronDown, ChevronUp, Copy, Wand2 } from 'lucide-react';
+import { Sparkles, RefreshCw, CheckCircle, X, ChevronDown, ChevronUp, Copy, Wand2, Cpu, Cloud } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { generateAIContent, type GenerateContentParams } from '@/lib/api';
+import { type GenerateContentParams } from '@/lib/api';
+import { routedGenerate, getRouterState } from '@/lib/aiRouter';
 import { toast } from 'sonner';
 
 export type AIFieldType =
@@ -179,7 +180,7 @@ export default function AIFieldGenerator({
     const prompts = FIELD_PROMPTS[fieldType](identityContext, currentValue);
 
     const params: GenerateContentParams = {
-      content_type: 'raw' as Parameters<typeof generateAIContent>[0]['content_type'],
+      content_type: 'raw',
       context: {
         _raw_system: prompts.system,
         _raw_user: prompts.user,
@@ -193,12 +194,22 @@ export default function AIFieldGenerator({
       },
     };
 
-    const { text, error } = await generateAIContent(params);
+    // Use credit-aware router — auto-falls back to local AI if cloud exhausted
+    const isSimple = fieldType === 'headline' || fieldType === 'skills';
+    const { text, error, source } = await routedGenerate(params, { isSimpleTask: isSimple });
 
     if (error) {
       toast.error('AI generation failed: ' + error);
       setGenerating(false);
       return;
+    }
+
+    // Show which AI engine was used (only on first local use)
+    if (source === 'local') {
+      const routerState = getRouterState();
+      toast.info(`🧠 Local AI (${routerState.selectedModel || 'Ollama'}) — running free`, {
+        id: 'local-ai-used', duration: 2500,
+      });
     }
 
     const result = text || '';
@@ -353,9 +364,14 @@ function AIGeneratorPanel({ fieldType, generating, generatedText, onTextChange, 
               </div>
             </div>
             <div className="text-xs text-muted-foreground text-center">
-              Gemini 3 Flash is generating your {FIELD_LABELS[fieldType].toLowerCase()}...
-              <br />
-              <span className="text-[10px] opacity-60">Using only your provided information</span>
+              {(() => {
+                const s = getRouterState();
+                const isLocal = s.forcedLocalMode || s.mode === 'local';
+                return isLocal
+                  ? <><span className="flex items-center gap-1 justify-center mb-0.5"><Cpu size={10} className="text-[hsl(145,100%,55%)]" /> Local AI ({s.selectedModel || 'Ollama'})</span>Generating {FIELD_LABELS[fieldType].toLowerCase()}...</>
+                  : <><span className="flex items-center gap-1 justify-center mb-0.5"><Cloud size={10} className="text-[hsl(265,80%,70%)]" /> Cloud AI (Gemini 3 Flash)</span>Generating {FIELD_LABELS[fieldType].toLowerCase()}...</>;
+              })()}
+              <span className="text-[10px] opacity-60 block mt-1">Using only your provided information</span>
             </div>
           </div>
         ) : generatedText ? (
